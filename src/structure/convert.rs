@@ -23,7 +23,7 @@ pub(crate) trait FromUsize {
 macro_rules! impls {
     ($pointer_width:expr, [ $($source:ty),* ], [ $($target:ty),* ]) => {
         #[cfg(target_pointer_width = $pointer_width)]
-        mod into_usize_impls {
+        mod impls {
             use super::*;
 
             $(
@@ -47,5 +47,30 @@ macro_rules! impls {
     }
 }
 
-impls!("32", [u8, u16, u32], [u32, u64]);
-impls!("64", [u8, u16, u32, u64], [u64]);
+impls!("32", [u32], [u32, u64]);
+impls!("64", [u32, u64], [u64]);
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn common() {
+        assert_eq!(1u32.into_usize(), 1usize);
+    }
+
+    #[test]
+    #[cfg(target_pointer_width = "32")]
+    fn only_arch_32() {
+        assert_eq!(u32::from_usize(1), 1);
+        assert_eq!(u64::from_usize(1), 1);
+    }
+
+    #[test]
+    #[cfg(target_pointer_width = "64")]
+    fn only_arch_64() {
+        // Should be compile-time error:
+        //assert_eq!(u32::from_usize(1), 1);
+        assert_eq!(u64::from_usize(1), 1);
+    }
+}
