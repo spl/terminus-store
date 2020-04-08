@@ -47,12 +47,13 @@
 //!
 //! * length: the number of elements in the log array
 
+use super::convert::*;
 use super::util;
 use crate::storage::*;
 use byteorder::{BigEndian, ByteOrder};
 use bytes::{Bytes, BytesMut};
 use futures::{future, prelude::*};
-use std::{cmp::Ordering, error, fmt, io};
+use std::{cmp::Ordering, convert::TryFrom, error, fmt, io};
 use tokio::codec::{Decoder, FramedRead};
 
 // Static assertion: We expect the system architecture bus width to be >= 32 bits. If it is not,
@@ -114,7 +115,7 @@ impl LogArrayError {
         }
 
         // Calculate the expected input buffer size. This includes the control word.
-        let minimum_buf_bit_size = len as usize * width as usize;
+        let minimum_buf_bit_size = len.into_usize() * width.into_usize();
         let minimum_buf_size = minimum_buf_bit_size + 7 >> 3;
         let expected_buf_size = minimum_buf_size + 15 >> 3 << 3;
 
@@ -201,7 +202,7 @@ impl LogArray {
 
     /// Returns the number of elements.
     pub fn len(&self) -> usize {
-        self.len as usize
+        self.len.into_usize()
     }
 
     /// Returns the bit width.
@@ -214,13 +215,13 @@ impl LogArray {
     /// Panics if `index` is >= the length of the log array.
     pub fn entry(&self, index: usize) -> u64 {
         assert!(
-            index < self.len as usize,
+            index < self.len.into_usize(),
             "expected index ({}) < length ({})",
             index,
             self.len
         );
 
-        let bit_index = self.width as usize * (self.first as usize + index);
+        let bit_index = self.width.into_usize() * (self.first.into_usize() + index);
 
         // Read the words that contain the element.
         let (first_word, second_word) = {
@@ -245,7 +246,7 @@ impl LogArray {
         let leading_zeros = 64 - self.width;
 
         // Get the bit offset in `first_word`.
-        let offset = (bit_index & 0b11_1111) as u8;
+        let offset = bit_index.bitmask(0b11_1111u8);
 
         // If the element fits completely in `first_word`, we can return it immediately.
         if offset + self.width <= 64 {
@@ -277,24 +278,24 @@ impl LogArray {
         LogArrayIterator {
             logarray: self.clone(),
             pos: 0,
-            end: self.len as usize,
+            end: self.len.into_usize(),
         }
     }
 
     /// Returns a logical slice of the elements in a log array.
     ///
-    /// Panics if `index` + `length` is >= the length of the log array.
+    /// Panics if `offset` > `u32::max_value()` or `index` + `length` >= the length of the log array.
     pub fn slice(&self, offset: usize, len: usize) -> LogArray {
         assert!(
-            offset + len <= self.len as usize,
+            offset + len <= self.len.into_usize(),
             "expected slice offset ({}) + length ({}) <= source length ({})",
             offset,
             len,
             self.len
         );
         LogArray {
-            first: self.first + offset as u32,
-            len: len as u32,
+            first: self.first + u32::try_from(offset).unwrap(),
+            len: u32::try_from(len).unwrap(),
             width: self.width,
             input_buf: self.input_buf.clone(),
         }
@@ -343,10 +344,10 @@ impl<W: 'static + tokio::io::AsyncWrite + Send> LogArrayFileBuilder<W> {
         } = self;
 
         // This is the minimum number of leading zeros that a decoded value should have.
-        let leading_zeros = 64 - width;
+        let leading_zeros = 64 - u32::from(width);
 
         // If `val` does not fit in the `width`, return an error.
-        future::result(if val.leading_zeros() < leading_zeros as u32 {
+        future::result(if val.leading_zeros() < leading_zeros {
             Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("expected value ({}) to fit in {} bits", val, width),
@@ -410,7 +411,7 @@ impl<W: 'static + tokio::io::AsyncWrite + Send> LogArrayFileBuilder<W> {
     }
 
     fn write_last_data(self) -> impl Future<Item = W, Error = io::Error> {
-        if self.count as u64 * self.width as u64 & 0b11_1111 == 0 {
+        if (self.count * u32::from(self.width)).bitmask(0b11_1111u8) == 0 {
             future::Either::A(future::ok(self.file))
         } else {
             future::Either::B(util::write_u64(self.file, self.current))

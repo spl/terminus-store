@@ -47,30 +47,59 @@ macro_rules! impls {
     }
 }
 
-impls!("32", [u32], [u32, u64]);
-impls!("64", [u32, u64], [u64]);
+impls!("32", [u8, u16, u32], [u32, u64]);
+impls!("64", [u8, u16, u32, u64], [u64]);
+
+/// Type-safe replacement for a bitmask that can reduce the size of the lefthand side.
+///
+/// By requiring that `mask` is `Mask`, we get an error if a value larger than `Mask::max_value()`
+/// is used.
+pub(crate) trait BitMask<Mask> {
+    fn bitmask(self, mask: Mask) -> Mask;
+}
+
+impl BitMask<u8> for usize {
+    #[inline]
+    fn bitmask(self, mask: u8) -> u8 {
+        (self & mask as usize) as u8
+    }
+}
+
+impl BitMask<u8> for u32 {
+    #[inline]
+    fn bitmask(self, mask: u8) -> u8 {
+        (self & mask as u32) as u8
+    }
+}
 
 #[cfg(test)]
 mod test {
     use super::*;
 
     #[test]
-    fn common() {
+    fn into_usize_common() {
+        assert_eq!(1u8.into_usize(), 1usize);
+        assert_eq!(1u16.into_usize(), 1usize);
         assert_eq!(1u32.into_usize(), 1usize);
     }
 
     #[test]
     #[cfg(target_pointer_width = "32")]
-    fn only_arch_32() {
+    fn from_usize_only_32() {
         assert_eq!(u32::from_usize(1), 1);
         assert_eq!(u64::from_usize(1), 1);
     }
 
     #[test]
     #[cfg(target_pointer_width = "64")]
-    fn only_arch_64() {
+    fn from_usize_only_64() {
         // Should be compile-time error:
         //assert_eq!(u32::from_usize(1), 1);
         assert_eq!(u64::from_usize(1), 1);
+    }
+
+    #[test]
+    fn bitmask_pass() {
+        assert_eq!(usize::max_value().bitmask(0x0f), 0x0f);
     }
 }
