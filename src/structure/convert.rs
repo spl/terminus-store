@@ -1,5 +1,9 @@
 //! Conversion utilities
 
+// Static assertion: We expect the system architecture bus width to be >= 32 bits. If it is not,
+// the following line will cause a compiler error. (Ignore the unrelated error message itself.)
+const _: usize = 0 - !(std::mem::size_of::<usize>() >= 32 >> 3) as usize;
+
 /// A type-safe replacement for `value as usize`, where `value: $ty` fits in `usize` without
 /// modification.
 ///
