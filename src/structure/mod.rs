@@ -6,6 +6,7 @@ pub mod adjacencylist;
 pub mod bitarray;
 pub mod bitindex;
 pub mod bititer;
+pub mod convert;
 pub mod logarray;
 pub mod pfc;
 mod util;

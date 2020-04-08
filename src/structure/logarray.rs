@@ -47,17 +47,14 @@
 //!
 //! * length: the number of elements in the log array
 
+use super::convert::*;
 use super::util;
 use crate::storage::*;
 use byteorder::{BigEndian, ByteOrder};
 use bytes::{Bytes, BytesMut};
 use futures::{future, prelude::*};
-use std::{cmp::Ordering, error, fmt, io};
+use std::{cmp::Ordering, convert::TryInto, error, fmt, io};
 use tokio::codec::{Decoder, FramedRead};
-
-// Static assertion: We expect the system architecture bus width to be >= 32 bits. If it is not,
-// the following line will cause a compiler error. (Ignore the unrelated error message itself.)
-const _: usize = 0 - !(std::mem::size_of::<usize>() >= 32 >> 3) as usize;
 
 /// An in-memory log array
 #[derive(Clone)]
@@ -87,19 +84,22 @@ pub struct LogArray {
 #[derive(Debug, PartialEq)]
 pub enum LogArrayError {
     InputBufTooSmall(usize),
+    InputBufTooLarge(usize),
     WidthTooLarge(u8),
-    UnexpectedBufSize(usize, usize, u32, u8),
+    UnexpectedBufSize(u32, u32, u32, u8),
 }
 
 impl LogArrayError {
     /// Validate the input buffer size.
     ///
     /// It must have at least the control word.
-    fn validate_input_buf_size(input_buf_size: usize) -> Result<(), Self> {
+    fn validate_input_buf_size(input_buf_size: usize) -> Result<u32, Self> {
         if input_buf_size < 8 {
             return Err(LogArrayError::InputBufTooSmall(input_buf_size));
         }
-        Ok(())
+        input_buf_size
+            .try_into()
+            .map_err(|_| LogArrayError::InputBufTooLarge(input_buf_size))
     }
 
     /// Validate the number of elements and bit width against the input buffer size.
@@ -108,13 +108,13 @@ impl LogArrayError {
     ///
     /// The input buffer size should be the appropriate multiple of 8 to include the exact number
     /// of encoded elements plus the control word.
-    fn validate_len_and_width(input_buf_size: usize, len: u32, width: u8) -> Result<(), Self> {
+    fn validate_len_and_width(input_buf_size: u32, len: u32, width: u8) -> Result<(), Self> {
         if width > 64 {
             return Err(LogArrayError::WidthTooLarge(width));
         }
 
         // Calculate the expected input buffer size. This includes the control word.
-        let minimum_buf_bit_size = len as usize * width as usize;
+        let minimum_buf_bit_size = len * u32::from(width);
         let minimum_buf_size = minimum_buf_bit_size + 7 >> 3;
         let expected_buf_size = minimum_buf_size + 15 >> 3 << 3;
 
@@ -138,6 +138,12 @@ impl fmt::Display for LogArrayError {
             InputBufTooSmall(input_buf_size) => {
                 write!(f, "expected input buffer size ({}) >= 8", input_buf_size)
             }
+            InputBufTooLarge(input_buf_size) => write!(
+                f,
+                "expected input buffer size ({}) >= {}",
+                input_buf_size,
+                u32::max_value()
+            ),
             WidthTooLarge(width) => write!(f, "expected width ({}) <= 64", width),
             UnexpectedBufSize(input_buf_size, expected_buf_size, len, width) => write!(
                 f,
@@ -158,8 +164,8 @@ impl From<LogArrayError> for io::Error {
 
 pub struct LogArrayIterator {
     logarray: LogArray,
-    pos: usize,
-    end: usize,
+    pos: u32,
+    end: u32,
 }
 
 impl Iterator for LogArrayIterator {
@@ -178,7 +184,7 @@ impl Iterator for LogArrayIterator {
 
 /// Read the length and bit width from the control word buffer. `buf` must start at the first word
 /// after the data buffer. `input_buf_size` is used for validation.
-fn read_control_word(buf: &[u8], input_buf_size: usize) -> Result<(u32, u8), LogArrayError> {
+fn read_control_word(buf: &[u8], input_buf_size: u32) -> Result<(u32, u8), LogArrayError> {
     let len = BigEndian::read_u32(buf);
     let width = buf[4];
     LogArrayError::validate_len_and_width(input_buf_size, len, width)?;
@@ -189,8 +195,9 @@ impl LogArray {
     /// Construct a `LogArray` by parsing a `Bytes` buffer.
     pub fn parse(input_buf: Bytes) -> Result<LogArray, LogArrayError> {
         let input_buf_size = input_buf.len();
-        LogArrayError::validate_input_buf_size(input_buf_size)?;
-        let (len, width) = read_control_word(&input_buf[input_buf_size - 8..], input_buf_size)?;
+        let control_word_index = input_buf_size - 8;
+        let input_buf_size = LogArrayError::validate_input_buf_size(input_buf.len())?;
+        let (len, width) = read_control_word(&input_buf[control_word_index..], input_buf_size)?;
         Ok(LogArray {
             first: 0,
             len,
@@ -200,8 +207,8 @@ impl LogArray {
     }
 
     /// Returns the number of elements.
-    pub fn len(&self) -> usize {
-        self.len as usize
+    pub fn len(&self) -> u32 {
+        self.len
     }
 
     /// Returns the bit width.
@@ -212,20 +219,20 @@ impl LogArray {
     /// Reads the data buffer and returns the element at the given index.
     ///
     /// Panics if `index` is >= the length of the log array.
-    pub fn entry(&self, index: usize) -> u64 {
+    pub fn entry(&self, index: u32) -> u64 {
         assert!(
-            index < self.len as usize,
+            index < self.len,
             "expected index ({}) < length ({})",
             index,
             self.len
         );
 
-        let bit_index = self.width as usize * (self.first as usize + index);
+        let bit_index = u32::from(self.width) * (self.first + index);
 
         // Read the words that contain the element.
         let (first_word, second_word) = {
             // Calculate the byte index from the bit index.
-            let byte_index = bit_index >> 6 << 3;
+            let byte_index = bit_index.into_usize() >> 6 << 3;
 
             let buf = &self.input_buf;
 
@@ -245,7 +252,7 @@ impl LogArray {
         let leading_zeros = 64 - self.width;
 
         // Get the bit offset in `first_word`.
-        let offset = (bit_index & 0b11_1111) as u8;
+        let offset = bit_index.bitmask(0b11_1111u8);
 
         // If the element fits completely in `first_word`, we can return it immediately.
         if offset + self.width <= 64 {
@@ -277,24 +284,24 @@ impl LogArray {
         LogArrayIterator {
             logarray: self.clone(),
             pos: 0,
-            end: self.len as usize,
+            end: self.len,
         }
     }
 
     /// Returns a logical slice of the elements in a log array.
     ///
     /// Panics if `index` + `length` is >= the length of the log array.
-    pub fn slice(&self, offset: usize, len: usize) -> LogArray {
+    pub fn slice(&self, offset: u32, len: u32) -> LogArray {
         assert!(
-            offset + len <= self.len as usize,
+            offset + len <= self.len,
             "expected slice offset ({}) + length ({}) <= source length ({})",
             offset,
             len,
             self.len
         );
         LogArray {
-            first: self.first + offset as u32,
-            len: len as u32,
+            first: self.first + offset,
+            len: len,
             width: self.width,
             input_buf: self.input_buf.clone(),
         }
@@ -343,10 +350,10 @@ impl<W: 'static + tokio::io::AsyncWrite + Send> LogArrayFileBuilder<W> {
         } = self;
 
         // This is the minimum number of leading zeros that a decoded value should have.
-        let leading_zeros = 64 - width;
+        let leading_zeros = 64 - u32::from(width);
 
         // If `val` does not fit in the `width`, return an error.
-        future::result(if val.leading_zeros() < leading_zeros as u32 {
+        future::result(if val.leading_zeros() < leading_zeros {
             Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("expected value ({}) to fit in {} bits", val, width),
@@ -410,7 +417,7 @@ impl<W: 'static + tokio::io::AsyncWrite + Send> LogArrayFileBuilder<W> {
     }
 
     fn write_last_data(self) -> impl Future<Item = W, Error = io::Error> {
-        if self.count as u64 * self.width as u64 & 0b11_1111 == 0 {
+        if (self.count * u32::from(self.width)).bitmask(0b11_1111u8) == 0 {
             future::Either::A(future::ok(self.file))
         } else {
             future::Either::B(util::write_u64(self.file, self.current))
@@ -561,13 +568,14 @@ pub fn logarray_file_get_length_and_width<F: FileLoad>(
     f: F,
 ) -> impl Future<Item = (F, u32, u8), Error = io::Error> {
     LogArrayError::validate_input_buf_size(f.size())
-        .map_or_else(|e| Err(e.into()), |_| Ok(f))
+        .map_or_else(|e| Err(e.into()), |input_buf_size| Ok((f, input_buf_size)))
         .into_future()
-        .and_then(|f| {
-            tokio::io::read_exact(f.open_read_from(f.size() - 8), [0; 8]).map(|(_, buf)| (f, buf))
+        .and_then(|(f, input_buf_size)| {
+            tokio::io::read_exact(f.open_read_from(f.size() - 8), [0; 8])
+                .map(move |(_, buf)| (f, input_buf_size, buf))
         })
-        .and_then(|(f, control_word)| {
-            read_control_word(&control_word, f.size())
+        .and_then(|(f, input_buf_size, control_word)| {
+            read_control_word(&control_word, input_buf_size)
                 .map_or_else(|e| Err(e.into()), |(len, width)| Ok((f, len, width)))
                 .into_future()
         })
@@ -606,11 +614,11 @@ impl MonotonicLogArray {
         MonotonicLogArray(logarray)
     }
 
-    pub fn len(&self) -> usize {
+    pub fn len(&self) -> u32 {
         self.0.len()
     }
 
-    pub fn entry(&self, index: usize) -> u64 {
+    pub fn entry(&self, index: u32) -> u64 {
         self.0.entry(index)
     }
 
@@ -618,7 +626,7 @@ impl MonotonicLogArray {
         self.0.iter()
     }
 
-    pub fn index_of(&self, element: u64) -> Option<usize> {
+    pub fn index_of(&self, element: u64) -> Option<u32> {
         if self.len() == 0 {
             return None;
         }
@@ -681,8 +689,8 @@ mod tests {
         let val = |buf_size| LogArrayError::validate_input_buf_size(buf_size);
         let err = |buf_size| Err(LogArrayError::InputBufTooSmall(buf_size));
         assert_eq!(err(7), val(7));
-        assert_eq!(Ok(()), val(8));
-        assert_eq!(Ok(()), val(9));
+        assert_eq!(Ok(8), val(8));
+        assert_eq!(Ok(9), val(9));
     }
 
     #[test]
@@ -945,11 +953,11 @@ mod tests {
         let monotonic = MonotonicLogArray::from_logarray(logarray);
 
         for (i, &val) in original.iter().enumerate() {
-            assert_eq!(i, monotonic.index_of(val).unwrap());
+            assert_eq!(i, monotonic.index_of(val).unwrap().into_usize());
         }
 
         assert_eq!(None, monotonic.index_of(12));
-        assert_eq!(original.len(), monotonic.len());
+        assert_eq!(original.len(), monotonic.len().into_usize());
     }
 
     #[test]
