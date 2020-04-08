@@ -14,6 +14,7 @@
 //! [reference Java implementation]: https://github.com/rdfhdt/hdt-java/blob/master/hdt-java-core/src/main/java/org/rdfhdt/hdt/compact/integer/VByte.java
 //! [Protocol Buffers]: https://developers.google.com/protocol-buffers/docs/encoding
 
+use super::convert::*;
 use futures::prelude::*;
 use std::io::Error;
 use tokio::io::{write_all, AsyncWrite};
@@ -25,7 +26,7 @@ pub const MAX_ENCODING_LEN: usize = 10;
 pub fn encoding_len(num: u64) -> usize {
     match num {
         0 => 1,
-        num => ((64 + 6) - num.leading_zeros() as usize) / 7,
+        num => ((64 + 6) - num.leading_zeros().into_usize()) / 7,
     }
 }
 
@@ -87,11 +88,11 @@ pub fn decode(buf: &[u8]) -> Result<(u64, usize), DecodeError> {
                 Err(DecodeError::EncodedValueTooLarge)
             } else {
                 // Return the result (clearing the msb) and the encoding length.
-                Ok((num | ((clear_msb(b) as u64) << shift), i + 1))
+                Ok((num | (u64::from(clear_msb(b)) << shift), i + 1))
             };
         }
         // This is not the last byte. Update the result.
-        num |= (b as u64) << shift;
+        num |= u64::from(b) << shift;
         // Increment the shift amount for the next 7 bits.
         shift += 7;
         // Stop if we are about to exceed the maximum encoding length.
@@ -126,14 +127,14 @@ unsafe fn encode_unchecked(buf: &mut [u8], mut num: u64) -> usize {
     // Loop through all 7-bit strings of the number.
     while more_than_7bits_remain(num) {
         // This is not the last encoded byte.
-        *buf.get_unchecked_mut(i) = clear_msb(num as u8);
+        *buf.get_unchecked_mut(i) = clear_msb(u8::truncate(num));
         // Get the next 7 bits.
         num >>= 7;
         // Increment the index.
         i += 1;
     }
     // This is the last encoded byte.
-    *buf.get_unchecked_mut(i) = set_msb(num as u8);
+    *buf.get_unchecked_mut(i) = set_msb(u8::truncate(num));
     // Return the encoding length.
     i + 1
 }
