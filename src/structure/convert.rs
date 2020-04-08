@@ -54,6 +54,18 @@ macro_rules! impls {
 impls!("32", [u8, u16, u32], [u32, u64]);
 impls!("64", [u8, u16, u32, u64], [u64]);
 
+/// Replacement for using `as` to clearly indicate truncation.
+pub(crate) trait Truncate<T> {
+    fn truncate(value: T) -> Self;
+}
+
+impl Truncate<u64> for u8 {
+    #[inline]
+    fn truncate(value: u64) -> u8 {
+        value as u8
+    }
+}
+
 /// Type-safe replacement for a bitmask that can reduce the size of the lefthand side.
 ///
 /// By requiring that `mask` is `Mask`, we get an error if a value larger than `Mask::max_value()`
@@ -100,6 +112,11 @@ mod test {
         // Should be compile-time error:
         //assert_eq!(u32::from_usize(1), 1);
         assert_eq!(u64::from_usize(1), 1);
+    }
+
+    #[test]
+    fn truncate_pass() {
+        assert_eq!(u8::truncate(0xaa_aau64), 0xaa);
     }
 
     #[test]

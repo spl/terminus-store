@@ -127,14 +127,14 @@ unsafe fn encode_unchecked(buf: &mut [u8], mut num: u64) -> usize {
     // Loop through all 7-bit strings of the number.
     while more_than_7bits_remain(num) {
         // This is not the last encoded byte.
-        *buf.get_unchecked_mut(i) = clear_msb(num as u8);
+        *buf.get_unchecked_mut(i) = clear_msb(u8::truncate(num));
         // Get the next 7 bits.
         num >>= 7;
         // Increment the index.
         i += 1;
     }
     // This is the last encoded byte.
-    *buf.get_unchecked_mut(i) = set_msb(num as u8);
+    *buf.get_unchecked_mut(i) = set_msb(u8::truncate(num));
     // Return the encoding length.
     i + 1
 }
